@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Analysis/ValueTracking.h"
+#include "ValueTrackingInternal.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/FloatingPointMode.h"
@@ -124,9 +125,9 @@ static const Instruction *safeCtxI(const Value *V, const Instruction *CtxI) {
   return nullptr;
 }
 
-static bool getShuffleDemandedElts(const ShuffleVectorInst *Shuf,
-                                   const APInt &DemandedElts,
-                                   APInt &DemandedLHS, APInt &DemandedRHS) {
+bool llvm::getShuffleDemandedElts(const ShuffleVectorInst *Shuf,
+                                  const APInt &DemandedElts, APInt &DemandedLHS,
+                                  APInt &DemandedRHS) {
   if (isa<ScalableVectorType>(Shuf->getType())) {
     assert(DemandedElts == APInt(1,1));
     DemandedLHS = DemandedRHS = DemandedElts;
@@ -902,9 +903,9 @@ static bool cmpExcludesZero(CmpInst::Predicate Pred, const Value *RHS) {
   return true;
 }
 
-static void breakSelfRecursivePHI(const Use *U, const PHINode *PHI,
-                                  Value *&ValOut, Instruction *&CtxIOut,
-                                  const PHINode **PhiOut = nullptr) {
+void llvm::breakSelfRecursivePHI(const Use *U, const PHINode *PHI,
+                                 Value *&ValOut, Instruction *&CtxIOut,
+                                 const PHINode **PhiOut) {
   ValOut = U->get();
   if (ValOut == PHI)
     return;
@@ -5212,8 +5213,9 @@ static void computeKnownFPClassFromCond(const Value *V, Value *Cond,
 /// frexp(0) = 0, so the tighter max-assuming-nonzero bound is only usable when
 /// \p V is known not to be a logical zero (e.g., for fabs(x) < 0.25, the non-0
 /// exponent range is [-149, -2], but the 0 edge case is above this range).
-static std::tuple<int, int, int>
-computeKnownExponentRangeFromContext(const Value *V, const SimplifyQuery &Q) {
+std::tuple<int, int, int>
+llvm::computeKnownExponentRangeFromContext(const Value *V,
+                                           const SimplifyQuery &Q) {
   if (!Q.CtxI || !Q.DC || !Q.DT)
     return {APFloat::IEK_NaN, APFloat::IEK_Inf, APFloat::IEK_Inf};
 
@@ -6141,9 +6143,8 @@ void computeKnownFPClass(const Value *V, const APInt &DemandedElts,
 
       // The exponent is always a scalar, even when raising a vector to a power.
       const Value *Exp = II->getArgOperand(1);
-      unsigned BitWidth = Exp->getType()->getIntegerBitWidth();
-      KnownBits ExponentKnownBits(BitWidth);
-      computeKnownBits(Exp, APInt(1, 1), ExponentKnownBits, Q, Depth + 1);
+      KnownBits ExponentKnownBits =
+          computeKnownBits(Exp, APInt(1, 1), Q, Depth + 1);
 
       FPClassTest InterestedSrcs = fcNone;
       if (InterestedClasses & fcNan)
@@ -6775,8 +6776,7 @@ void computeKnownFPClass(const Value *V, const APInt &DemandedElts,
     }
 
     const Type *EltTy = Ty->getScalarType();
-    KnownBits Bits(EltTy->getPrimitiveSizeInBits());
-    computeKnownBits(Src, DemandedElts, Bits, Q, Depth + 1);
+    KnownBits Bits = computeKnownBits(Src, DemandedElts, Q, Depth + 1);
 
     Known = KnownFPClass::bitcast(EltTy->getFltSemantics(), Bits);
     break;
