@@ -25,6 +25,8 @@ void logical_not_to_bool(void) {
   int x = 5;
   bool b = !a;
   bool c = !x;
+  // CHECK-MESSAGES: :[[@LINE-1]]:13: warning: implicit conversion 'int' -> 'bool' [readability-implicit-bool-conversion]
+  // CHECK-FIXES: bool c = x == 0;
 }
 
 void logical_with_literals(void) {

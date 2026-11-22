@@ -116,6 +116,11 @@ Some additional accommodations are made for C:
   ignored.
 - `bool` (or `_Bool`) conditions in conditional operators (`?:`) are
   ignored.
+- Integer, floating-point, and pointer expressions in `if`, `while`, `for`,
+  `do`, and `?:` conditions, and operands of `!`, `&&`, and `||`, are
+  diagnosed even though C does not insert an implicit cast to `bool` there.
+  `AllowIntegerConditions` and `AllowPointerConditions` apply to those
+  conditions.
 
 Occurrences of implicit conversions inside macros and template instantiations
 are deliberately ignored, as it is not clear how to deal with such cases.
