@@ -72,8 +72,9 @@ static bool isUnaryLogicalNotOperator(const Stmt *Statement) {
 }
 
 static void fixGenericExprCastToBool(const DiagnosticBuilder &Diag,
-                                     const ImplicitCastExpr *Cast,
-                                     const Stmt *Parent, ASTContext &Context,
+                                     const Expr *SubExpr, const Stmt *Parent,
+                                     CastKind Kind, SourceLocation BeginLoc,
+                                     SourceLocation EndLoc, ASTContext &Context,
                                      bool UseUpperCaseLiteralSuffix) {
   // In case of expressions like (! integer), we should remove the redundant not
   // operator and use inverted comparison (integer == 0).
@@ -89,8 +90,6 @@ static void fixGenericExprCastToBool(const DiagnosticBuilder &Diag,
     Parent = Context.getParents(*Parent)[0].get<Stmt>();
   }
 
-  const Expr *SubExpr = Cast->getSubExpr();
-
   const bool NeedInnerParens =
       utils::fixit::areParensNeededForStatement(*SubExpr->IgnoreImpCasts());
   const bool NeedOuterParens =
@@ -104,7 +103,7 @@ static void fixGenericExprCastToBool(const DiagnosticBuilder &Diag,
     StartLocInsertion += '(';
 
   if (!StartLocInsertion.empty())
-    Diag << FixItHint::CreateInsertion(Cast->getBeginLoc(), StartLocInsertion);
+    Diag << FixItHint::CreateInsertion(BeginLoc, StartLocInsertion);
 
   std::string EndLocInsertion;
 
@@ -116,8 +115,8 @@ static void fixGenericExprCastToBool(const DiagnosticBuilder &Diag,
   else
     EndLocInsertion += " != ";
 
-  const StringRef ZeroLiteral = getZeroLiteralToCompareWithForType(
-      Cast->getCastKind(), SubExpr->getType(), Context);
+  const StringRef ZeroLiteral =
+      getZeroLiteralToCompareWithForType(Kind, SubExpr->getType(), Context);
 
   if (UseUpperCaseLiteralSuffix)
     EndLocInsertion += ZeroLiteral.upper();
@@ -127,9 +126,9 @@ static void fixGenericExprCastToBool(const DiagnosticBuilder &Diag,
   if (NeedOuterParens)
     EndLocInsertion += ')';
 
-  const SourceLocation EndLoc = Lexer::getLocForEndOfToken(
-      Cast->getEndLoc(), 0, Context.getSourceManager(), Context.getLangOpts());
-  Diag << FixItHint::CreateInsertion(EndLoc, EndLocInsertion);
+  const SourceLocation InsertionEndLoc = Lexer::getLocForEndOfToken(
+      EndLoc, 0, Context.getSourceManager(), Context.getLangOpts());
+  Diag << FixItHint::CreateInsertion(InsertionEndLoc, EndLocInsertion);
 }
 
 static StringRef getEquivalentBoolLiteralForExpr(const Expr *Expression,
@@ -324,61 +323,6 @@ static CastKind castKindForCScalar(QualType Type) {
   if (Type->isRealFloatingType())
     return CK_FloatingToBoolean;
   return CK_IntegralToBoolean;
-}
-
-static void fixCScalarCondition(const DiagnosticBuilder &Diag,
-                                const Expr *Inner, ASTContext &Context,
-                                bool UseUpperCaseLiteralSuffix) {
-  const StringRef EquivalentLiteral =
-      getEquivalentBoolLiteralForExpr(Inner, Context);
-  if (!EquivalentLiteral.empty()) {
-    Diag << tooling::fixit::createReplacement(*Inner, EquivalentLiteral);
-    return;
-  }
-
-  const Stmt *Parent = skipParensAndImplicitCasts(Inner, Context);
-  const bool InvertComparison =
-      Parent != nullptr && isUnaryLogicalNotOperator(Parent);
-  if (InvertComparison) {
-    const SourceLocation ParentStartLoc = Parent->getBeginLoc();
-    const SourceLocation ParentEndLoc =
-        cast<UnaryOperator>(Parent)->getSubExpr()->getBeginLoc();
-    Diag << FixItHint::CreateRemoval(
-        CharSourceRange::getCharRange(ParentStartLoc, ParentEndLoc));
-
-    const DynTypedNodeList Parents = Context.getParents(*Parent);
-    Parent = Parents.empty() ? nullptr : Parents[0].get<Stmt>();
-  }
-
-  const bool NeedInnerParens =
-      utils::fixit::areParensNeededForStatement(*Inner);
-  const bool NeedOuterParens =
-      Parent != nullptr && utils::fixit::areParensNeededForStatement(*Parent);
-
-  std::string StartLocInsertion;
-  if (NeedOuterParens)
-    StartLocInsertion += '(';
-  if (NeedInnerParens)
-    StartLocInsertion += '(';
-  if (!StartLocInsertion.empty())
-    Diag << FixItHint::CreateInsertion(Inner->getBeginLoc(), StartLocInsertion);
-
-  std::string EndLocInsertion;
-  if (NeedInnerParens)
-    EndLocInsertion += ')';
-  EndLocInsertion += InvertComparison ? " == " : " != ";
-
-  const StringRef ZeroLiteral = getZeroLiteralToCompareWithForType(
-      castKindForCScalar(Inner->getType()), Inner->getType(), Context);
-  EndLocInsertion +=
-      UseUpperCaseLiteralSuffix ? ZeroLiteral.upper() : ZeroLiteral.str();
-
-  if (NeedOuterParens)
-    EndLocInsertion += ')';
-
-  const SourceLocation EndLoc = Lexer::getLocForEndOfToken(
-      Inner->getEndLoc(), 0, Context.getSourceManager(), Context.getLangOpts());
-  Diag << FixItHint::CreateInsertion(EndLoc, EndLocInsertion);
 }
 
 ImplicitBoolConversionCheck::ImplicitBoolConversionCheck(
@@ -588,7 +532,9 @@ void ImplicitBoolConversionCheck::handleCastToBool(const ImplicitCastExpr *Cast,
   if (!EquivalentLiteral.empty()) {
     Diag << tooling::fixit::createReplacement(*Cast, EquivalentLiteral);
   } else {
-    fixGenericExprCastToBool(Diag, Cast, Parent, Context,
+    fixGenericExprCastToBool(Diag, Cast->getSubExpr(), Parent,
+                             Cast->getCastKind(), Cast->getBeginLoc(),
+                             Cast->getEndLoc(), Context,
                              UseUpperCaseLiteralSuffix);
   }
 }
@@ -616,7 +562,17 @@ void ImplicitBoolConversionCheck::handleCScalarCondition(const Expr *Matched,
       diag(Context.getSourceManager().getFileLoc(Inner->getBeginLoc()),
            "implicit conversion %0 -> 'bool'")
       << DiagType;
-  fixCScalarCondition(Diag, Inner, Context, UseUpperCaseLiteralSuffix);
+
+  const StringRef EquivalentLiteral =
+      getEquivalentBoolLiteralForExpr(Inner, Context);
+  if (!EquivalentLiteral.empty()) {
+    Diag << tooling::fixit::createReplacement(*Inner, EquivalentLiteral);
+    return;
+  }
+  fixGenericExprCastToBool(
+      Diag, Inner, skipParensAndImplicitCasts(Inner, Context),
+      castKindForCScalar(Inner->getType()), Inner->getBeginLoc(),
+      Inner->getEndLoc(), Context, UseUpperCaseLiteralSuffix);
 }
 
 void ImplicitBoolConversionCheck::handleCastFromBool(
