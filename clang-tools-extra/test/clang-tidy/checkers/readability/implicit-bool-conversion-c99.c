@@ -12,6 +12,8 @@ void test_c99_logical_ops(void) {
 
   if (b1 && b2) {}
   if (b1 && returns_int()) {}
+  // CHECK-MESSAGES: :[[@LINE-1]]:13: warning: implicit conversion 'int' -> 'bool' [readability-implicit-bool-conversion]
+  // CHECK-FIXES: if (b1 && (returns_int() != 0)) {}
 }
 
 void test_c99_comparison(void) {
@@ -40,4 +42,14 @@ void test_c99_pointer_conversion(int *p) {
   _Bool b = p;
   // CHECK-MESSAGES: :[[@LINE-1]]:13: warning: implicit conversion 'int *' -> 'bool'
   // CHECK-FIXES: _Bool b = p != 0;
+}
+
+void test_c99_scalar_conditions(int *p, int n) {
+  if (p) {}
+  // CHECK-MESSAGES: :[[@LINE-1]]:7: warning: implicit conversion 'int *' -> 'bool' [readability-implicit-bool-conversion]
+  // CHECK-FIXES: if (p != 0) {}
+
+  if (!n) {}
+  // CHECK-MESSAGES: :[[@LINE-1]]:8: warning: implicit conversion 'int' -> 'bool'
+  // CHECK-FIXES: if (n == 0) {}
 }

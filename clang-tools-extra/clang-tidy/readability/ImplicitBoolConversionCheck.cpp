@@ -216,10 +216,9 @@ getEquivalentForBoolLiteral(const CXXBoolLiteralExpr *BoolLiteral,
   return BoolLiteral->getValue() ? "1" : "0";
 }
 
-static bool isCastAllowedInCondition(const ImplicitCastExpr *Cast,
-                                     ASTContext &Context) {
+static bool isInCondition(const Stmt *Statement, ASTContext &Context) {
   std::queue<const Stmt *> Q;
-  Q.push(Cast);
+  Q.push(Statement);
 
   const TraversalKindScope RAII(Context, TK_AsIs);
 
@@ -252,6 +251,134 @@ static bool isLogicalOperatorResult(const ImplicitCastExpr *Cast) {
   if (const auto *UnOp = dyn_cast<UnaryOperator>(SubExpr))
     return UnOp->getOpcode() == UO_LNot;
   return false;
+}
+
+static bool isMacroExpansionAt(const Stmt *Statement, ASTContext &Context) {
+  const SourceManager &SM = Context.getSourceManager();
+  const SourceLocation Loc = Statement->getBeginLoc();
+  return SM.isMacroBodyExpansion(Loc) || SM.isMacroArgExpansion(Loc);
+}
+
+// A scalar that C tests against zero without an implicit cast to bool.
+static bool isDiagnosedCScalar(const Expr *Expression, ASTContext &Context) {
+  Expression = Expression->IgnoreParenImpCasts();
+  if (isMacroExpansionAt(Expression, Context))
+    return false;
+
+  const QualType Type = Expression->getType();
+  const bool IsScalar = Type->isPointerType() || Type->isArrayType() ||
+                        Type->isFunctionType() || Type->isRealFloatingType() ||
+                        (Type->isIntegerType() && !Type->isBooleanType());
+  if (!IsScalar)
+    return false;
+
+  if (const auto *BinOp = dyn_cast<BinaryOperator>(Expression))
+    if (BinOp->isComparisonOp() || BinOp->isLogicalOp())
+      return false;
+  if (const auto *UnOp = dyn_cast<UnaryOperator>(Expression))
+    if (UnOp->getOpcode() == UO_LNot)
+      return false;
+  return true;
+}
+
+static bool hasDiagnosedCScalarOperand(const Expr *Expression,
+                                       ASTContext &Context) {
+  Expression = Expression->IgnoreParenImpCasts();
+  if (const auto *UnOp = dyn_cast<UnaryOperator>(Expression)) {
+    if (UnOp->getOpcode() != UO_LNot)
+      return false;
+    const Expr *SubExpr = UnOp->getSubExpr();
+    return isDiagnosedCScalar(SubExpr, Context) ||
+           hasDiagnosedCScalarOperand(SubExpr, Context);
+  }
+  if (const auto *BinOp = dyn_cast<BinaryOperator>(Expression)) {
+    if (!BinOp->isLogicalOp())
+      return false;
+    return isDiagnosedCScalar(BinOp->getLHS(), Context) ||
+           isDiagnosedCScalar(BinOp->getRHS(), Context) ||
+           hasDiagnosedCScalarOperand(BinOp->getLHS(), Context) ||
+           hasDiagnosedCScalarOperand(BinOp->getRHS(), Context);
+  }
+  return false;
+}
+
+static const Stmt *skipParensAndImplicitCasts(const Stmt *Statement,
+                                              ASTContext &Context) {
+  const TraversalKindScope RAII(Context, TK_AsIs);
+  while (Statement) {
+    const DynTypedNodeList Parents = Context.getParents(*Statement);
+    if (Parents.empty())
+      return nullptr;
+    const Stmt *Parent = Parents[0].get<Stmt>();
+    if (!Parent || !(isa<ParenExpr>(Parent) || isa<ImplicitCastExpr>(Parent) ||
+                     isa<ExprWithCleanups>(Parent)))
+      return Parent;
+    Statement = Parent;
+  }
+  return nullptr;
+}
+
+static CastKind castKindForCScalar(QualType Type) {
+  if (Type->isPointerType() || Type->isArrayType() || Type->isFunctionType())
+    return CK_PointerToBoolean;
+  if (Type->isRealFloatingType())
+    return CK_FloatingToBoolean;
+  return CK_IntegralToBoolean;
+}
+
+static void fixCScalarCondition(const DiagnosticBuilder &Diag,
+                                const Expr *Inner, ASTContext &Context,
+                                bool UseUpperCaseLiteralSuffix) {
+  const StringRef EquivalentLiteral =
+      getEquivalentBoolLiteralForExpr(Inner, Context);
+  if (!EquivalentLiteral.empty()) {
+    Diag << tooling::fixit::createReplacement(*Inner, EquivalentLiteral);
+    return;
+  }
+
+  const Stmt *Parent = skipParensAndImplicitCasts(Inner, Context);
+  const bool InvertComparison =
+      Parent != nullptr && isUnaryLogicalNotOperator(Parent);
+  if (InvertComparison) {
+    const SourceLocation ParentStartLoc = Parent->getBeginLoc();
+    const SourceLocation ParentEndLoc =
+        cast<UnaryOperator>(Parent)->getSubExpr()->getBeginLoc();
+    Diag << FixItHint::CreateRemoval(
+        CharSourceRange::getCharRange(ParentStartLoc, ParentEndLoc));
+
+    const DynTypedNodeList Parents = Context.getParents(*Parent);
+    Parent = Parents.empty() ? nullptr : Parents[0].get<Stmt>();
+  }
+
+  const bool NeedInnerParens =
+      utils::fixit::areParensNeededForStatement(*Inner);
+  const bool NeedOuterParens =
+      Parent != nullptr && utils::fixit::areParensNeededForStatement(*Parent);
+
+  std::string StartLocInsertion;
+  if (NeedOuterParens)
+    StartLocInsertion += '(';
+  if (NeedInnerParens)
+    StartLocInsertion += '(';
+  if (!StartLocInsertion.empty())
+    Diag << FixItHint::CreateInsertion(Inner->getBeginLoc(), StartLocInsertion);
+
+  std::string EndLocInsertion;
+  if (NeedInnerParens)
+    EndLocInsertion += ')';
+  EndLocInsertion += InvertComparison ? " == " : " != ";
+
+  const StringRef ZeroLiteral = getZeroLiteralToCompareWithForType(
+      castKindForCScalar(Inner->getType()), Inner->getType(), Context);
+  EndLocInsertion +=
+      UseUpperCaseLiteralSuffix ? ZeroLiteral.upper() : ZeroLiteral.str();
+
+  if (NeedOuterParens)
+    EndLocInsertion += ')';
+
+  const SourceLocation EndLoc = Lexer::getLocForEndOfToken(
+      Inner->getEndLoc(), 0, Context.getSourceManager(), Context.getLangOpts());
+  Diag << FixItHint::CreateInsertion(EndLoc, EndLocInsertion);
 }
 
 ImplicitBoolConversionCheck::ImplicitBoolConversionCheck(
@@ -328,6 +455,35 @@ void ImplicitBoolConversionCheck::registerMatchers(MatchFinder *Finder) {
                    .bind("implicitCastToBool")),
       this);
 
+  // C conditions and logical operands are scalar tests against zero, but the
+  // AST has no implicit cast to bool there. if (ptr) is only an lvalue-to-
+  // rvalue of the pointer; &&, ||, and ! have type int.
+  const auto CScalarCondition =
+      expr(unless(isMacroExpansion()), unless(hasType(booleanType())),
+           anyOf(hasType(pointerType()), hasType(isInteger()),
+                 hasType(realFloatingPointType()), hasType(arrayType()),
+                 hasType(functionType())),
+           unless(binaryOperator(hasAnyOperatorName(">", ">=", "==", "!=", "<",
+                                                    "<=", "&&", "||"))),
+           unless(unaryOperator(hasOperatorName("!"))))
+          .bind("cScalarCondition");
+  const auto CScalar = ignoringParenImpCasts(CScalarCondition);
+  Finder->addMatcher(
+      traverse(
+          TK_AsIs,
+          stmt(
+              isC(),
+              anyOf(
+                  ifStmt(hasCondition(CScalar)),
+                  whileStmt(hasCondition(CScalar)),
+                  doStmt(hasCondition(CScalar)), forStmt(hasCondition(CScalar)),
+                  conditionalOperator(hasCondition(CScalar)),
+                  binaryConditionalOperator(hasCondition(CScalar)),
+                  unaryOperator(hasOperatorName("!"), hasUnaryOperand(CScalar)),
+                  binaryOperator(hasAnyOperatorName("&&", "||"),
+                                 eachOf(hasLHS(CScalar), hasRHS(CScalar)))))),
+      this);
+
   auto BoolComparison = binaryOperator(hasAnyOperatorName("==", "!="),
                                        hasLHS(ImplicitCastFromBool),
                                        hasRHS(ImplicitCastFromBool));
@@ -372,6 +528,11 @@ void ImplicitBoolConversionCheck::registerMatchers(MatchFinder *Finder) {
 
 void ImplicitBoolConversionCheck::check(
     const MatchFinder::MatchResult &Result) {
+  if (const auto *Scalar = Result.Nodes.getNodeAs<Expr>("cScalarCondition")) {
+    handleCScalarCondition(Scalar, *Result.Context);
+    return;
+  }
+
   if (const auto *CastToBool =
           Result.Nodes.getNodeAs<ImplicitCastExpr>("implicitCastToBool")) {
     const auto *Parent = Result.Nodes.getNodeAs<Stmt>("parentStmt");
@@ -393,18 +554,27 @@ void ImplicitBoolConversionCheck::handleCastToBool(const ImplicitCastExpr *Cast,
   if (AllowPointerConditions &&
       (Cast->getCastKind() == CK_PointerToBoolean ||
        Cast->getCastKind() == CK_MemberPointerToBoolean) &&
-      isCastAllowedInCondition(Cast, Context)) {
+      isInCondition(Cast, Context)) {
     return;
   }
 
   if (AllowIntegerConditions && Cast->getCastKind() == CK_IntegralToBoolean &&
-      isCastAllowedInCondition(Cast, Context)) {
+      isInCondition(Cast, Context)) {
     return;
   }
 
   if (AllowLogicalOperatorConversion &&
       Cast->getCastKind() == CK_IntegralToBoolean &&
       isLogicalOperatorResult(Cast)) {
+    return;
+  }
+
+  // The operand diagnostics below cover this conversion. Reporting both
+  // overlaps the fix-its: !ptr becomes ptr == nullptr, not (!ptr) != 0.
+  if (Context.getLangOpts().C99 &&
+      Cast->getCastKind() == CK_IntegralToBoolean &&
+      isLogicalOperatorResult(Cast) &&
+      hasDiagnosedCScalarOperand(Cast->getSubExpr(), Context)) {
     return;
   }
 
@@ -421,6 +591,32 @@ void ImplicitBoolConversionCheck::handleCastToBool(const ImplicitCastExpr *Cast,
     fixGenericExprCastToBool(Diag, Cast, Parent, Context,
                              UseUpperCaseLiteralSuffix);
   }
+}
+
+void ImplicitBoolConversionCheck::handleCScalarCondition(const Expr *Matched,
+                                                         ASTContext &Context) {
+  const Expr *Inner = Matched->IgnoreParenImpCasts();
+  if (!isDiagnosedCScalar(Inner, Context))
+    return;
+
+  const QualType Type = Inner->getType();
+  const bool IsPointer =
+      Type->isPointerType() || Type->isArrayType() || Type->isFunctionType();
+  const bool IsInteger = Type->isIntegerType() && !Type->isBooleanType();
+  if (((IsPointer && AllowPointerConditions) ||
+       (IsInteger && AllowIntegerConditions)) &&
+      isInCondition(Inner, Context))
+    return;
+
+  QualType DiagType = Type;
+  if (Type->isArrayType() || Type->isFunctionType())
+    DiagType = Context.getDecayedType(Type);
+
+  const auto Diag =
+      diag(Context.getSourceManager().getFileLoc(Inner->getBeginLoc()),
+           "implicit conversion %0 -> 'bool'")
+      << DiagType;
+  fixCScalarCondition(Diag, Inner, Context, UseUpperCaseLiteralSuffix);
 }
 
 void ImplicitBoolConversionCheck::handleCastFromBool(

@@ -30,6 +30,7 @@ public:
 private:
   void handleCastToBool(const ImplicitCastExpr *CastExpression,
                         const Stmt *ParentStatement, ASTContext &Context);
+  void handleCScalarCondition(const Expr *Matched, ASTContext &Context);
   void handleCastFromBool(const ImplicitCastExpr *Cast,
                           const ImplicitCastExpr *NextImplicitCast,
                           ASTContext &Context);

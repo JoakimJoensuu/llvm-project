@@ -442,6 +442,15 @@ infrastructure are described first, followed by tool-specific sections.
   - Added the {option}`AllowTrailingUnderscore`, which permits a
     single trailing underscore on any identifier.
 
+- Improved {doc}`readability-implicit-bool-conversion
+  <clang-tidy/checks/readability/implicit-bool-conversion>` check to diagnose
+  implicit boolean tests of integers, floating-point values, and pointers in C
+  conditions and logical operators (`if`, `while`, `for`, `do`, `?:`, `!`,
+  `&&`, and `||`). C does not insert an implicit cast to `bool` there, so
+  code such as `if (ptr)` and `while (n)` was previously silent and now warns,
+  matching C++. {option}`AllowIntegerConditions` and
+  {option}`AllowPointerConditions` suppress these warnings in conditions.
+
 - Improved {doc}`readability-named-parameter
   <clang-tidy/checks/readability/named-parameter>` check by ignoring
   standard tag types (e.g. `std::in_place_t`, `std::allocator_arg_t`,

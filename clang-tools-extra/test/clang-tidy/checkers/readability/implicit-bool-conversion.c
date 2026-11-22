@@ -87,6 +87,8 @@ void ignoreImplicitConversionFromBoolInConditionalOperatorCondition() {
   int intFromParenthesizedCondition = ((boolean)) ? 1 : 0;
   int intFromAliasCondition = alias ? 1 : 0;
   int intFromExplicitCastCondition = (int)boolean ? 1 : 0;
+  // CHECK-MESSAGES: :[[@LINE-1]]:38: warning: implicit conversion 'int' -> 'bool'
+  // CHECK-FIXES: int intFromExplicitCastCondition = (((int)boolean) != 0) ? 1 : 0;
 
   bool anotherBoolean = false;
   int intFromBranch = boolean ? anotherBoolean : 0;
@@ -235,8 +237,8 @@ void implicitConversionInNegationExpressions() {
   int integer = 10;
   bool boolComingFromNegatedInt;
   boolComingFromNegatedInt = !integer;
-  // CHECK-MESSAGES: :[[@LINE-1]]:30: warning: implicit conversion 'int' -> 'bool'
-  // CHECK-FIXES: boolComingFromNegatedInt = ((!integer) != 0);
+  // CHECK-MESSAGES: :[[@LINE-1]]:31: warning: implicit conversion 'int' -> 'bool'
+  // CHECK-FIXES: boolComingFromNegatedInt = integer == 0;
 }
 
 bool implicitConversionToBoolInReturnValue() {
@@ -399,4 +401,54 @@ void checkNestedLogic(void) {
 
   if ((a && b) || c) {}
   if (c && (a || b)) {}
+}
+
+void implicitConversionInCConditions(int integer, int *pointer, float floating,
+                                     double doubleFloating) {
+  if (integer) {}
+  // CHECK-MESSAGES: :[[@LINE-1]]:7: warning: implicit conversion 'int' -> 'bool'
+  // CHECK-FIXES: if (integer != 0) {}
+
+  if (!pointer) {}
+  // CHECK-MESSAGES: :[[@LINE-1]]:8: warning: implicit conversion 'int *' -> 'bool'
+  // CHECK-FIXES: if (pointer == nullptr) {}
+
+  while (pointer && integer) {}
+  // CHECK-MESSAGES: :[[@LINE-1]]:10: warning: implicit conversion 'int *' -> 'bool'
+  // CHECK-MESSAGES: :[[@LINE-2]]:21: warning: implicit conversion 'int' -> 'bool'
+  // CHECK-FIXES: while ((pointer != nullptr) && (integer != 0)) {}
+
+  for (; pointer; ) {}
+  // CHECK-MESSAGES: :[[@LINE-1]]:10: warning: implicit conversion 'int *' -> 'bool'
+  // CHECK-FIXES: for (; pointer != nullptr; ) {}
+
+  do {} while (integer);
+  // CHECK-MESSAGES: :[[@LINE-1]]:16: warning: implicit conversion 'int' -> 'bool'
+  // CHECK-FIXES: do {} while (integer != 0);
+
+  int value = pointer ? 1 : 2;
+  // CHECK-MESSAGES: :[[@LINE-1]]:15: warning: implicit conversion 'int *' -> 'bool'
+  // CHECK-FIXES: int value = (pointer != nullptr) ? 1 : 2;
+
+  while (1) {}
+  // CHECK-MESSAGES: :[[@LINE-1]]:10: warning: implicit conversion 'int' -> 'bool'
+  // CHECK-FIXES: while (true) {}
+
+  if (floating) {}
+  // CHECK-MESSAGES: :[[@LINE-1]]:7: warning: implicit conversion 'float' -> 'bool'
+  // CHECK-FIXES: if (floating != 0.0f) {}
+  // CHECK-FIXES-UPPER-CASE: if (floating != 0.0F) {}
+
+  if (doubleFloating) {}
+  // CHECK-MESSAGES: :[[@LINE-1]]:7: warning: implicit conversion 'double' -> 'bool'
+  // CHECK-FIXES: if (doubleFloating != 0.0) {}
+
+  int localArray[2] = {};
+  if (localArray) {}
+  // CHECK-MESSAGES: :[[@LINE-1]]:7: warning: implicit conversion 'int *' -> 'bool'
+  // CHECK-FIXES: if (localArray != nullptr) {}
+
+  if (integer > 0) {}
+  if (pointer != nullptr) {}
+  if (returns_bool()) {}
 }
